@@ -1,0 +1,123 @@
+name: ASN Cloudflare IP Detection
+
+on:
+  workflow_dispatch:
+    inputs:
+      asns:
+        description: 'ASN 列表 (逗号分隔)'
+        required: true
+        default: 'AS61112,AS8888,AS906,AS16509'
+        type: string
+      port:
+        description: '扫描端口'
+        required: true
+        default: '443'
+        type: string
+  schedule:
+    # 每天 UTC 00:00 (北京时间 08:00) 自动运行一次
+    - cron: '0 0 * * *'
+
+# 授予工作流向仓库写入/推送代码的权限
+permissions:
+  contents: write
+
+jobs:
+  asn-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub Actions 单任务上限 6 小时
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq masscan prips dnsutils libpcap-dev
+
+      - name: Compile cf-scanner
+        run: |
+          cd cf-scanner-src
+          go build -o ../cf-scanner main.go
+          chmod +x ../cf-scanner
+          cd ..
+
+      - name: Run ASN Scanner
+        id: run_scanner
+        run: |
+          # 获取待扫描的 ASN 和 端口
+          ASNS="${{ github.event.inputs.asns || 'AS61112,AS8888,AS906,AS16509' }}"
+          PORT="${{ github.event.inputs.port || '443' }}"
+
+          echo "=========================================="
+          echo "开始执行扫描任务"
+          echo "目标 ASN: $ASNS"
+          echo "目标端口: $PORT"
+          echo "测速选项: 自动跳过测速"
+          echo "=========================================="
+
+          # 通过管道输入 "n\n" 自动跳过测速，并在最后输出完成后自动退出
+          printf "n\n" | sudo python3 run.py $ASNS -p $PORT
+
+      - name: Commit and Push Results to Repository Root
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # 查找最新生成的 CSV 文件
+          LATEST_CSV=$(ls -t output_*.csv 2>/dev/null | head -n 1)
+          if [ -n "$LATEST_CSV" ]; then
+            # 同时复制一份固定文件名为 result.csv，方便下游程序直接引用
+            cp "$LATEST_CSV" result.csv
+            
+            # 添加到版本库
+            git add "$LATEST_CSV" result.csv
+            
+            # 检查是否有文件变更
+            if git diff --staged --quiet; then
+              echo "没有检测到内容变化，跳过提交。"
+            else
+              git commit -m "chore(auto): update ASN scan results ($LATEST_CSV) [skip ci]"
+              git push
+              echo "✅ 已成功将结果推送到项目根目录！"
+            fi
+          else
+            echo "⚠️ 未找到生成的 CSV 文件，跳过 Git 提交。"
+          fi
+
+      - name: Generate Summary in GitHub Step Summary
+        if: always()
+        run: |
+          echo "### 📊 ASN 扫描结果报告" >> $GITHUB_STEP_SUMMARY
+          if ls output_*.csv 1> /dev/null 2>&1; then
+            CSV_FILE=$(ls -t output_*.csv | head -n 1)
+            TOTAL_COUNT=$(($(wc -l < "$CSV_FILE") - 1))
+            echo "- **生成文件**: \`$CSV_FILE\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **最新文件别名**: \`result.csv\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **有效 Cloudflare 节点数**: **$TOTAL_COUNT**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "#### 前 10 条节点预览" >> $GITHUB_STEP_SUMMARY
+            echo "| IP地址 | 端口 | TLS | 数据中心 | 地区 | 城市 | ASN |" >> $GITHUB_STEP_SUMMARY
+            echo "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+            tail -n +2 "$CSV_FILE" | head -n 10 | awk -F',' '{print "| "$1" | "$2" | "$3" | "$4" | "$5" | "$6" | "$9" |"}' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ 未发现有效节点或扫描未产生输出 CSV 文件。" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Result Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asn-cf-results-${{ github.run_id }}
+          path: output_*.csv
+          if-no-files-found: warn
