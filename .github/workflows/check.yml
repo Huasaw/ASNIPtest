@@ -6,16 +6,21 @@ on:
       asns:
         description: 'ASN 列表 (逗号分隔)'
         required: true
-        default: 'AS61112,AS8888,AS906'
+        default: 'AS61112,AS8888,AS906,AS16509'
         type: string
       port:
         description: '扫描端口'
         required: true
         default: '443'
         type: string
+      masscan_rate:
+        description: 'masscan 扫描发包速率 (pps)'
+        required: true
+        default: '10000'
+        type: string
   schedule:
-    # 每天 UTC 00:00 (北京时间 08:00) 自动运行一次
-    - cron: '0 0 * * *'
+    # 每天北京时间 05:30 (即 UTC 21:30) 自动运行一次
+    - cron: '30 21 * * *'
 
 # 授予工作流向仓库写入/推送代码的权限
 permissions:
@@ -25,6 +30,9 @@ jobs:
   asn-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 360 # GitHub Actions 单任务上限 6 小时
+
+    env:
+      PYTHONUNBUFFERED: "1" # 禁用 Python 缓冲区，确保实时输出日志
 
     steps:
       - name: Checkout Repository
@@ -55,19 +63,21 @@ jobs:
       - name: Run ASN Scanner
         id: run_scanner
         run: |
-          # 获取待扫描的 ASN 和 端口
+          # 获取待扫描的 ASN、端口与速率
           ASNS="${{ github.event.inputs.asns || 'AS61112,AS8888,AS906,AS16509' }}"
           PORT="${{ github.event.inputs.port || '443' }}"
+          RATE="${{ github.event.inputs.masscan_rate || '10000' }}"
 
           echo "=========================================="
           echo "开始执行扫描任务"
           echo "目标 ASN: $ASNS"
           echo "目标端口: $PORT"
+          echo "发包速率: $RATE pps"
           echo "测速选项: 自动跳过测速"
           echo "=========================================="
 
-          # 通过管道输入 "n\n" 自动跳过测速，并在最后输出完成后自动退出
-          printf "n\n" | sudo python3 run.py $ASNS -p $PORT
+          # 通过管道输入 "n\n" 自动跳过测速，传递 MASSCAN_RATE 加快扫描
+          printf "n\n" | sudo env "MASSCAN_RATE=$RATE" "PYTHONUNBUFFERED=1" python3 -u run.py $ASNS -p $PORT
 
       - name: Commit and Push Results to Repository Root
         run: |
