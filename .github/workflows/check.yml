@@ -63,6 +63,9 @@ jobs:
       - name: Run ASN Scanner
         id: run_scanner
         run: |
+          # Keep timestamped CSV files temporary; only result.csv is published.
+          rm -f output_*.csv
+
           # 获取待扫描的 ASN、端口与速率
           ASNS="${{ github.event.inputs.asns || 'AS61112,AS8888,AS906' }}"
           PORT="${{ github.event.inputs.port || '443' }}"
@@ -91,7 +94,8 @@ jobs:
             cp "$LATEST_CSV" result.csv
             
             # 添加到版本库
-            git add "$LATEST_CSV" result.csv
+            git add -u -- 'output_*.csv'
+            git add result.csv
             
             # 检查是否有文件变更
             if git diff --staged --quiet; then
@@ -109,8 +113,8 @@ jobs:
         if: always()
         run: |
           echo "### 📊 ASN 扫描结果报告" >> $GITHUB_STEP_SUMMARY
-          if ls output_*.csv 1> /dev/null 2>&1; then
-            CSV_FILE=$(ls -t output_*.csv | head -n 1)
+          if [ -f result.csv ]; then
+            CSV_FILE="result.csv"
             TOTAL_COUNT=$(($(wc -l < "$CSV_FILE") - 1))
             echo "- **生成文件**: \`$CSV_FILE\`" >> $GITHUB_STEP_SUMMARY
             echo "- **最新文件别名**: \`result.csv\`" >> $GITHUB_STEP_SUMMARY
@@ -129,5 +133,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: asn-cf-results-${{ github.run_id }}
-          path: output_*.csv
+          path: result.csv
           if-no-files-found: warn
